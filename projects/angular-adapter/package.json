@@ -1,0 +1,41 @@
+{
+  "name": "@csvbox/angular2",
+  "version": "1.0.0",
+  "description": "Standalone Angular component for csvbox.io supporting Angular version 14 till 19",
+  "author": "csvbox-io",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/csvbox-io/angular-adapter.git"
+  },
+  "peerDependencies": {
+    "@angular/core": ">=14.0.0 <20.0.0",
+    "@angular/common": ">=14.0.0 <20.0.0"
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "keywords": [
+    "csv",
+    "importer",
+    "uploader",
+    "csvbox",
+    "parser",
+    "csv-parse",
+    "excel",
+    "xls",
+    "csv import",
+    "csv upload",
+    "spreadsheet import",
+    "angular csv",
+    "csv parse",
+    "csv to json"
+  ],
+  "bugs": {
+    "url": "https://github.com/csvbox-io/angular-adapter/issues"
+  },
+  "homepage": "https://github.com/csvbox-io/angular-adapter#readme",
+  "directories": {
+    "example": "example"
+  }
+}
