@@ -124,7 +124,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
             if (this.submitted) this.submitted();
           } else if (event.data.type && event.data.type === "data-push-status") {
             if (event.data.data.import_status === "success") {
-              if (event.data.data.row_data) {
+              if (event.data.row_data) {
                 const primary_row_data = event.data.row_data;
                 const headers = event.data.headers;
                 const rows: any[] = [];
