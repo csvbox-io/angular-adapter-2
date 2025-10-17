@@ -1,8 +1,8 @@
 # @csvbox/angular2
 
-> Standalone Angular component for csvbox.io supporting Angular version 14 till 19
+> Standalone Angular component for csvbox.io supporting Angular version 14 and above
 
-## ✅ Only for Angular version 14 to 19
+## ✅ Only for Angular version 14 and above
 ## ⚠️ For Angular version 13 or less, please use [@csvbox/angular](https://www.npmjs.com/package/@csvbox/angular) package
 
 [![NPM](https://img.shields.io/npm/v/@csvbox/angular2.svg)](https://www.npmjs.com/package/@csvbox/angular2) [![JavaScript Style Guide](https://img.shields.io/badge/code_style-standard-brightgreen.svg)](https://standardjs.com)
@@ -12,7 +12,7 @@
 | Angular Version	 | Package |
 | ------ | ------ |
 |8 to 13|[@csvbox/angular](https://www.npmjs.com/package/@csvbox/angular)|
-|14 to 19|@csvbox/angular2 (this package)|
+|14 and above|@csvbox/angular2 (this package)|
 
 ## Shell
 

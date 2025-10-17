@@ -1,6 +1,6 @@
 {
   "name": "@csvbox/angular2",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Standalone Angular component for csvbox.io supporting Angular version 14 till 20",
   "author": "csvbox-io",
   "license": "MIT",
