@@ -1,7 +1,7 @@
 {
   "name": "@csvbox/angular2",
   "version": "1.0.4",
-  "description": "Standalone Angular component for csvbox.io supporting Angular version 14 till 20",
+  "description": "Standalone Angular component for csvbox.io supporting Angular version 14 till 22",
   "author": "csvbox-io",
   "license": "MIT",
   "repository": {
@@ -9,11 +9,12 @@
     "url": "git+https://github.com/csvbox-io/angular-adapter-2.git"
   },
   "peerDependencies": {
-    "@angular/core": ">=14.0.0 <21.0.0",
-    "@angular/common": ">=14.0.0 <21.0.0"
+    "@angular/core": ">=14.0.0 <23.0.0",
+    "@angular/common": ">=14.0.0 <23.0.0"
   },
   "dependencies": {
-    "tslib": "^2.3.0"
+    "tslib": "^2.3.0",
+    "@csvbox/adapter": "^0.0.1"
   },
   "keywords": [
     "csv",
@@ -34,8 +35,5 @@
   "bugs": {
     "url": "https://github.com/csvbox-io/angular-adapter-2/issues"
   },
-  "homepage": "https://github.com/csvbox-io/angular-adapter-2#readme",
-  "directories": {
-    "example": "example"
-  }
+  "homepage": "https://github.com/csvbox-io/angular-adapter-2#readme"
 }
