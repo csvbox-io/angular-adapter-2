@@ -12,7 +12,11 @@ import {
 import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
 import { insertCSS } from './utils/insertCSS';
 
-const appVersion = '1.0.6';
+// Sent to the importer as `library-version`, and deliberately NOT this package's version. The
+// importer picks its message protocol from it: with framework=angular, 1.0.6 (tested against
+// app.csvbox.io, 2026-09-30) gets the legacy `mainModalShown` instead of `csvbox-modal-shown`,
+// which breaks openModalWithFile(). Every @csvbox/angular2 release so far has sent 1.1.16.
+const appVersion = '1.1.16';
 
 @Component({
   selector: 'csvbox-button',
