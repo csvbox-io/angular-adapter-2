@@ -11,7 +11,7 @@ import {
 
 import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
 import { insertCSS } from './utils/insertCSS';
-import { buildImportUrl, generateUuid, buildInitPayload, classifyStructuredMessage } from '@csvbox/adapter';
+import { buildImportUrl, generateUuid, buildInitPayload, classifyStructuredMessage, classifyLegacyMessage } from '@csvbox/adapter';
 
 // How long we wait for the importer to reply before sending the file anyway.
 const ORIGIN_PROBE_TIMEOUT_MS = 1500;
@@ -127,6 +127,23 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
   }
 
   private messageListener = (event: MessageEvent) => {
+    // Older importers send these as bare strings, without a token.
+    const legacy = classifyLegacyMessage(event.data);
+    if (legacy) {
+      if (legacy.type === "mainModalHidden") {
+        this.handleModalClosed();
+      } else if (legacy.type === "uploadSuccessful") {
+        if (this.onImport) this.onImport(true);
+        if (this.isImported) this.isImported(true);
+        if (this.imported) this.imported(true);
+      } else if (legacy.type === "uploadFailed") {
+        if (this.onImport) this.onImport(false);
+        if (this.isImported) this.isImported(false);
+        if (this.imported) this.imported(false);
+      }
+      return;
+    }
+
     // Set-file handshake messages. The shared core does not classify these, so they are
     // read here, behind the same unique_token check the core applies.
     const raw = event.data;
