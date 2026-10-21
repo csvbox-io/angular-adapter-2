@@ -6,7 +6,9 @@ import {
   SimpleChanges,
   SecurityContext,
   AfterContentInit,
-  OnDestroy
+  OnDestroy,
+  ChangeDetectorRef,
+  NgZone
 } from '@angular/core';
 
 import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
@@ -16,6 +18,60 @@ import { buildImportUrl, generateUuid, buildInitPayload, classifyStructuredMessa
 // How long we wait for the importer to reply before sending the file anyway.
 const ORIGIN_PROBE_TIMEOUT_MS = 1500;
 
+// Page-wide record of the importers that are open or opening, shared by every CSVBox adapter
+// on the page (it lives on window so separate copies of an adapter see the same list). It does
+// two things: the newest importer is stacked on top (every holder is fixed, full screen and
+// z-index 2147483647, so equal z-indexes would leave the one that comes first in the DOM on
+// top), and the other instances learn that an importer is open so they can disable their button.
+interface OpenImporterEntry { getHolder: () => HTMLElement | null; }
+interface OpenImporters { open: OpenImporterEntry[]; listeners: Array<() => void>; }
+const OPEN_IMPORTERS_KEY = '__csvboxOpenImporters';
+const TOP_Z_INDEX = 2147483647;
+
+function openImporters(): OpenImporters {
+  const w = window as any;
+  if (!w[OPEN_IMPORTERS_KEY]) w[OPEN_IMPORTERS_KEY] = { open: [], listeners: [] };
+  return w[OPEN_IMPORTERS_KEY];
+}
+
+function restackOpenImporters(reg: OpenImporters): void {
+  reg.open.forEach((entry, i) => {
+    const holder = entry.getHolder();
+    if (holder) holder.style.zIndex = String(TOP_Z_INDEX - (reg.open.length - 1 - i));
+  });
+}
+
+function registerOpenImporter(entry: OpenImporterEntry): void {
+  const reg = openImporters();
+  if (reg.open.indexOf(entry) >= 0) return;
+  reg.open.push(entry);
+  restackOpenImporters(reg);
+  reg.listeners.slice().forEach(fn => fn());
+}
+
+function unregisterOpenImporter(entry: OpenImporterEntry): void {
+  const reg = openImporters();
+  const i = reg.open.indexOf(entry);
+  if (i < 0) return;
+  reg.open.splice(i, 1);
+  restackOpenImporters(reg);
+  reg.listeners.slice().forEach(fn => fn());
+}
+
+function isBlockedByOpenImporter(entry: OpenImporterEntry): boolean {
+  const reg = openImporters();
+  return reg.open.length > 0 && reg.open.indexOf(entry) < 0;
+}
+
+function subscribeOpenImporters(fn: () => void): () => void {
+  const reg = openImporters();
+  reg.listeners.push(fn);
+  return () => {
+    const i = reg.listeners.indexOf(fn);
+    if (i >= 0) reg.listeners.splice(i, 1);
+  };
+}
+
 const appVersion = '1.1.16';
 
 @Component({
@@ -23,7 +79,7 @@ const appVersion = '1.1.16';
   standalone: true,
   template: `
     <div>
-      <button [disabled]="disabled" (click)="openModal()" [attr.data-csvbox-token]="uuid">
+      <button [disabled]="disabled || blockedByOther" (click)="openModal()" [attr.data-csvbox-token]="uuid">
         <ng-content></ng-content>
       </button>
     </div>
@@ -73,7 +129,14 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
 
   @Input() disabled: boolean = true;
 
-  constructor(public sanitizer: DomSanitizer) {}
+  constructor(public sanitizer: DomSanitizer, private cdr: ChangeDetectorRef, private zone: NgZone) {}
+
+  // True while a different importer on the page is open: the button stays disabled.
+  blockedByOther: boolean = false;
+
+  private registryEntry: OpenImporterEntry = { getHolder: () => this.holder };
+
+  private unsubscribeOpenImporters: (() => void) | null = null;
 
   holder: HTMLDivElement | null = null;
 
@@ -130,6 +193,11 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     // Older importers send these as bare strings, without a token.
     const legacy = classifyLegacyMessage(event.data);
     if (legacy) {
+      // Legacy messages carry no token, so the only way to tell which importer sent one is its
+      // window. Ignore those that came from another instance's iframe (or anywhere else).
+      if (!this.iframe || event.source !== this.iframe.contentWindow) {
+        return;
+      }
       if (legacy.type === "mainModalHidden") {
         this.handleModalClosed();
       } else if (legacy.type === "uploadSuccessful") {
@@ -172,6 +240,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
         if (!this.isModalShown && this.holder) {
           this.holder.style.display = 'none';
           this.holder.style.pointerEvents = 'auto';
+          unregisterOpenImporter(this.registryEntry);
         }
         console.warn("[csvbox] importer declined the supplied file: " + raw.data.reason);
         return;
@@ -209,6 +278,8 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
 
   ngAfterContentInit(): void {
     window.addEventListener("message", this.messageListener, false);
+    this.syncBlocked();
+    this.unsubscribeOpenImporters = subscribeOpenImporters(() => this.syncBlocked());
 
     if (this.lazy) {
       this.disabled = false;
@@ -218,9 +289,25 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     }
   }
 
+  private syncBlocked(): void {
+    const blocked = isBlockedByOpenImporter(this.registryEntry);
+    if (blocked !== this.blockedByOther) {
+      // The registry can call back from outside Angular's zone (another instance, another app).
+      this.zone.run(() => {
+        this.blockedByOther = blocked;
+        this.cdr.markForCheck();
+      });
+    }
+  }
+
   ngOnDestroy(): void {
     this.clearProbeTimer();
     window.removeEventListener("message", this.messageListener);
+    unregisterOpenImporter(this.registryEntry);
+    if (this.unsubscribeOpenImporters) {
+      this.unsubscribeOpenImporters();
+      this.unsubscribeOpenImporters = null;
+    }
   }
 
   handleModalClosed(): void {
@@ -238,6 +325,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     this.importerOrigin = null;
     this.probingOrigin = false;
     this.clearProbeTimer();
+    unregisterOpenImporter(this.registryEntry);
     if (this.onClose) this.onClose();
     if (this.isClosed) this.isClosed();
     if (this.closed) this.closed();
@@ -279,9 +367,14 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     document.body.insertAdjacentElement(
       'beforeend', this.holder
     );
+    // The holder did not exist yet if openModal() asked for the importer before it was built.
+    restackOpenImporters(openImporters());
   }
 
   openModal(): void {
+    // Counts as open from the moment it is requested, so the other buttons are disabled while
+    // this importer is still loading, and so it is stacked above any importer opened earlier.
+    registerOpenImporter(this.registryEntry);
     if(!this.iframe) {
         this.openModalOnIframeLoad = true;
         this.initImporter();
