@@ -17,6 +17,8 @@ import { buildImportUrl, generateUuid, buildInitPayload, classifyStructuredMessa
 
 // How long we wait for the importer to reply before sending the file anyway.
 const ORIGIN_PROBE_TIMEOUT_MS = 1500;
+// How long we wait for the importer to confirm a file it was sent before giving up on it.
+const FILE_ACK_TIMEOUT_MS = 8000;
 
 // Page-wide record of the importers that are open or opening, shared by every CSVBox adapter
 // on the page (it lives on window so separate copies of an adapter see the same list). It does
@@ -153,6 +155,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
   probingOrigin: boolean = false;
 
   private probeTimer: any = null;
+  private fileAckTimer: any = null;
 
   ngOnInit(): void {
     this.uuid = generateUuid();
@@ -223,6 +226,8 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
         return;
       }
       if (raw.type === "csvbox-modal-shown") {
+        this.clearFileAckTimer();
+        registerOpenImporter(this.registryEntry);
         // What the file path in openModal() is waiting for. display as well as
         // pointer-events: a second file declined while the first was still opening the
         // modal has put the holder away in the meantime.
@@ -234,6 +239,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
         return;
       }
       if (raw.type === "csvbox-set-file-rejected") {
+        this.clearFileAckTimer();
         // The importer has the file and will not take it. Put the holder away only if the
         // modal was never confirmed up: a file declined while it is open leaves that modal
         // where it is, and its own 'csvbox-modal-hidden' will put the holder away.
@@ -482,6 +488,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
       unique_token: this.uuid
     }, origin);
     this.pendingFile = null;
+    this.startFileAckTimer();
   }
 
   // Remember the importer's origin, only from our own iframe, with our token, and a csvbox host.
@@ -514,9 +521,41 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
   }
 
   clearProbeTimer(): void {
-    if(this.probeTimer) {
+    this.clearFileAckTimer();
+    if (this.probeTimer) {
       clearTimeout(this.probeTimer);
       this.probeTimer = null;
     }
+  }
+
+  startFileAckTimer(): void {
+    this.clearFileAckTimer();
+    this.fileAckTimer = setTimeout(() => {
+      this.fileAckTimer = null;
+      this.giveUpOnFile();
+    }, FILE_ACK_TIMEOUT_MS);
+  }
+
+  clearFileAckTimer(): void {
+    if (this.fileAckTimer) {
+      clearTimeout(this.fileAckTimer);
+      this.fileAckTimer = null;
+    }
+  }
+
+  // The importer never confirmed the file it was sent (an origin we do not trust, or an importer too
+  // old to know the message). Without this the holder would stay up, invisible and click-through,
+  // and the other instances' buttons would stay disabled for good.
+  giveUpOnFile(): void {
+    if (this.isModalShown) {
+      return;
+    }
+    const holder = this.holder;
+    if (holder) {
+      holder.style.display = 'none';
+      holder.style.pointerEvents = 'auto';
+    }
+    unregisterOpenImporter(this.registryEntry);
+    console.warn("[csvbox] the importer did not respond to the supplied file");
   }
 }
