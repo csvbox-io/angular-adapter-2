@@ -13,10 +13,8 @@ import {
 
 import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
 import { insertCSS } from './utils/insertCSS';
-import { buildImportUrl, generateUuid, buildInitPayload, classifyStructuredMessage, classifyLegacyMessage } from '@csvbox/adapter';
+import { buildImportUrl, generateUuid, buildInitPayload, createFileSender, classifyStructuredMessage, classifyLegacyMessage } from '@csvbox/adapter';
 
-// How long we wait for the importer to reply before sending the file anyway.
-const ORIGIN_PROBE_TIMEOUT_MS = 1500;
 // How long we wait for the importer to confirm a file it was sent before giving up on it.
 const FILE_ACK_TIMEOUT_MS = 8000;
 
@@ -138,6 +136,19 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
 
   private registryEntry: OpenImporterEntry = { getHolder: () => this.holder };
 
+  private fileSender = createFileSender({
+    getIframe: () => this.iframe,
+    getToken: () => this.uuid as string,
+    getTargetOrigin: () => this.targetOrigin as string,
+    getBaseDomain: () => this.baseDomain,
+    takeFile: () => {
+      const file = this.pendingFile;
+      this.pendingFile = null;
+      return file;
+    },
+    onSent: () => this.startFileAckTimer()
+  });
+
   private unsubscribeOpenImporters: (() => void) | null = null;
 
   holder: HTMLDivElement | null = null;
@@ -150,11 +161,6 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
   // targetOrigin. baseDomain is used to check the real origin before trusting it.
   baseDomain: string = "app.csvbox.io";
 
-  importerOrigin: string | null = null;
-
-  probingOrigin: boolean = false;
-
-  private probeTimer: any = null;
   private fileAckTimer: any = null;
 
   ngOnInit(): void {
@@ -219,7 +225,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     // read here, behind the same unique_token check the core applies.
     const raw = event.data;
     if (raw && typeof raw === "object" && raw.data && raw.data.unique_token == this.uuid) {
-      this.learnImporterOrigin(event);
+      this.fileSender.learnOrigin(event);
 
       if (raw.type === "csvbox-set-file-rejected" && raw.data.reason === "not-a-file") {
         // Reply to our probe (it has no file). It only tells us the origin, so do nothing.
@@ -328,8 +334,6 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     this.holder = null;
     this.iframe = null;
     // A new iframe is built on the next open, so the origin is learned again.
-    this.importerOrigin = null;
-    this.probingOrigin = false;
     this.clearProbeTimer();
     unregisterOpenImporter(this.registryEntry);
     if (this.onClose) this.onClose();
@@ -406,7 +410,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
             this.holder.style.pointerEvents = 'none';
             this.holder.style.display = 'block';
           }
-          this.postPendingFile();
+          this.fileSender.send();
         } else {
           this.isModalShown = true;
           if(this.holder) {
@@ -446,86 +450,16 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     // takes it only while it is still on the upload step, and ignores it once the user has a
     // dataset and a mapping in progress.
     if(this.isModalShown && this.iframe && this.isIframeLoaded) {
-      this.postPendingFile();
+      this.fileSender.send();
       return;
     }
 
     this.openModal();
   }
 
-  postPendingFile(): void {
-    if(this.importerOrigin) {
-      this.sendPendingFile(this.importerOrigin);
-      return;
-    }
-
-    // Origin not known yet: send a probe without the file, and send the file to the origin
-    // that replies. If nobody replies in time, use targetOrigin like before.
-    if(this.probingOrigin) {
-      return;
-    }
-    if(this.iframe && this.iframe.contentWindow) {
-      this.probingOrigin = true;
-      this.iframe.contentWindow.postMessage({
-        type: 'csvbox-set-file',
-        unique_token: this.uuid
-      }, '*');
-      this.probeTimer = setTimeout(() => {
-        this.probeTimer = null;
-        this.probingOrigin = false;
-        this.sendPendingFile(this.targetOrigin as string);
-      }, ORIGIN_PROBE_TIMEOUT_MS);
-    }
-  }
-
-  sendPendingFile(origin: string): void {
-    if(!this.pendingFile || !this.iframe || !this.iframe.contentWindow) {
-      return;
-    }
-    this.iframe.contentWindow.postMessage({
-      type: 'csvbox-set-file',
-      file: this.pendingFile,
-      unique_token: this.uuid
-    }, origin);
-    this.pendingFile = null;
-    this.startFileAckTimer();
-  }
-
-  // Remember the importer's origin, only from our own iframe, with our token, and a csvbox host.
-  learnImporterOrigin(event: MessageEvent): void {
-    if(this.importerOrigin || !this.iframe || event.source !== this.iframe.contentWindow) {
-      return;
-    }
-    if(!this.isImporterOrigin(event.origin)) {
-      return;
-    }
-    this.importerOrigin = event.origin;
-    if(this.probingOrigin) {
-      this.probingOrigin = false;
-      this.clearProbeTimer();
-      this.sendPendingFile(this.importerOrigin);
-    }
-  }
-
-  isImporterOrigin(origin: string): boolean {
-    let url: URL;
-    try {
-      url = new URL(origin);
-    } catch (e) {
-      return false;
-    }
-    if(url.protocol !== 'https:') {
-      return false;
-    }
-    return url.host === this.baseDomain || url.host.endsWith(`-${this.baseDomain}`);
-  }
-
   clearProbeTimer(): void {
     this.clearFileAckTimer();
-    if (this.probeTimer) {
-      clearTimeout(this.probeTimer);
-      this.probeTimer = null;
-    }
+    this.fileSender.reset();
   }
 
   startFileAckTimer(): void {
