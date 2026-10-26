@@ -13,64 +13,26 @@ import {
 
 import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
 import { insertCSS } from './utils/insertCSS';
-import { buildImportUrl, generateUuid, buildInitPayload, createFileSender, classifyStructuredMessage, classifyLegacyMessage } from '@csvbox/adapter';
+import {
+  buildImportUrl,
+  generateUuid,
+  buildInitPayload,
+  createModalLifecycle,
+  createMessageGate,
+  createImportTracker,
+  createFileSender,
+  classifyStructuredMessage,
+  classifyLegacyMessage,
+  registerOpenImporter,
+  unregisterOpenImporter,
+  isBlockedByOpenImporter,
+  subscribeOpenImporters,
+  restackOpenImporters,
+  OpenImporterEntry
+} from '@csvbox/adapter';
 
 // How long we wait for the importer to confirm a file it was sent before giving up on it.
 const FILE_ACK_TIMEOUT_MS = 8000;
-
-// Page-wide record of the importers that are open or opening, shared by every CSVBox adapter
-// on the page (it lives on window so separate copies of an adapter see the same list). It does
-// two things: the newest importer is stacked on top (every holder is fixed, full screen and
-// z-index 2147483647, so equal z-indexes would leave the one that comes first in the DOM on
-// top), and the other instances learn that an importer is open so they can disable their button.
-interface OpenImporterEntry { getHolder: () => HTMLElement | null; }
-interface OpenImporters { open: OpenImporterEntry[]; listeners: Array<() => void>; }
-const OPEN_IMPORTERS_KEY = '__csvboxOpenImporters';
-const TOP_Z_INDEX = 2147483647;
-
-function openImporters(): OpenImporters {
-  const w = window as any;
-  if (!w[OPEN_IMPORTERS_KEY]) w[OPEN_IMPORTERS_KEY] = { open: [], listeners: [] };
-  return w[OPEN_IMPORTERS_KEY];
-}
-
-function restackOpenImporters(reg: OpenImporters): void {
-  reg.open.forEach((entry, i) => {
-    const holder = entry.getHolder();
-    if (holder) holder.style.zIndex = String(TOP_Z_INDEX - (reg.open.length - 1 - i));
-  });
-}
-
-function registerOpenImporter(entry: OpenImporterEntry): void {
-  const reg = openImporters();
-  if (reg.open.indexOf(entry) >= 0) return;
-  reg.open.push(entry);
-  restackOpenImporters(reg);
-  reg.listeners.slice().forEach(fn => fn());
-}
-
-function unregisterOpenImporter(entry: OpenImporterEntry): void {
-  const reg = openImporters();
-  const i = reg.open.indexOf(entry);
-  if (i < 0) return;
-  reg.open.splice(i, 1);
-  restackOpenImporters(reg);
-  reg.listeners.slice().forEach(fn => fn());
-}
-
-function isBlockedByOpenImporter(entry: OpenImporterEntry): boolean {
-  const reg = openImporters();
-  return reg.open.length > 0 && reg.open.indexOf(entry) < 0;
-}
-
-function subscribeOpenImporters(fn: () => void): () => void {
-  const reg = openImporters();
-  reg.listeners.push(fn);
-  return () => {
-    const i = reg.listeners.indexOf(fn);
-    if (i >= 0) reg.listeners.splice(i, 1);
-  };
-}
 
 const appVersion = '1.1.16';
 
@@ -102,7 +64,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
 
   @Input() importerReady?: () => void;
   @Input() closed?: () => void;
-  @Input() submitted?: () => void;
+  @Input() submitted?: (metadata: any) => void;
   @Input() imported?: (success: boolean, metadata?: any) => void;
   @Input() loadStarted?: () => void;
 
@@ -119,6 +81,8 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
   @Input() theme: string | null = null;
 
   @Input() isIframeLoaded: boolean = false;
+  // No longer read: whether to open once the iframe has loaded is tracked by `lifecycle`. Kept so
+  // templates that already bind it still compile.
   @Input() openModalOnIframeLoad: boolean = false;
 
   @Input() lazy: boolean = false;
@@ -133,6 +97,10 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
 
   // True while a different importer on the page is open: the button stays disabled.
   blockedByOther: boolean = false;
+
+  private lifecycle = createModalLifecycle();
+  private messageGate = createMessageGate();
+  private importTracker = createImportTracker();
 
   private registryEntry: OpenImporterEntry = { getHolder: () => this.holder };
 
@@ -207,6 +175,11 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
       if (!this.iframe || event.source !== this.iframe.contentWindow) {
         return;
       }
+      // A newer importer sends the typed message as well; act on that one only.
+      if (!this.messageGate.allowLegacy()) {
+        return;
+      }
+      const ended = this.importTracker.observe(legacy);
       if (legacy.type === "mainModalHidden") {
         this.handleModalClosed();
       } else if (legacy.type === "uploadSuccessful") {
@@ -218,33 +191,33 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
         if (this.isImported) this.isImported(false);
         if (this.imported) this.imported(false);
       }
+      this.finishImport(ended);
       return;
     }
 
-    // Set-file handshake messages. The shared core does not classify these, so they are
-    // read here, behind the same unique_token check the core applies.
-    const raw = event.data;
-    if (raw && typeof raw === "object" && raw.data && raw.data.unique_token == this.uuid) {
-      this.fileSender.learnOrigin(event);
-
-      if (raw.type === "csvbox-set-file-rejected" && raw.data.reason === "not-a-file") {
+    // File handshake messages (what openModalWithFile waits for). handleMessage also learns the
+    // importer's origin from any message that carries this instance's token.
+    const fileMessage = this.fileSender.handleMessage(event);
+    if (fileMessage) {
+      if (fileMessage.type === "probe-reply") {
         // Reply to our probe (it has no file). It only tells us the origin, so do nothing.
         return;
       }
-      if (raw.type === "csvbox-modal-shown") {
+      if (fileMessage.type === "modal-shown") {
         this.clearFileAckTimer();
         registerOpenImporter(this.registryEntry);
         // What the file path in openModal() is waiting for. display as well as
         // pointer-events: a second file declined while the first was still opening the
         // modal has put the holder away in the meantime.
         this.isModalShown = true;
+        this.lifecycle.requestOpen();
         if (this.holder) {
           this.holder.style.display = 'block';
           this.holder.style.pointerEvents = 'auto';
         }
         return;
       }
-      if (raw.type === "csvbox-set-file-rejected") {
+      if (fileMessage.type === "rejected") {
         this.clearFileAckTimer();
         // The importer has the file and will not take it. Put the holder away only if the
         // modal was never confirmed up: a file declined while it is open leaves that modal
@@ -254,7 +227,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
           this.holder.style.pointerEvents = 'auto';
           unregisterOpenImporter(this.registryEntry);
         }
-        console.warn("[csvbox] importer declined the supplied file: " + raw.data.reason);
+        console.warn("[csvbox] importer declined the supplied file: " + fileMessage.reason);
         return;
       }
     }
@@ -263,15 +236,14 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     if (!message) {
       return;
     }
+    this.messageGate.markTyped();
+    const ended = this.importTracker.observe(message);
 
     if (message.type === "data-on-submit") {
       if (this.onSubmit) this.onSubmit(message.metadata);
       if (this.isSubmitted) this.isSubmitted(message.metadata);
-      if (this.submitted) this.submitted();
+      if (this.submitted) this.submitted(message.metadata);
     } else if (message.type === "data-push-status") {
-      if (!message.success) {
-        delete message.metadata["unique_token"];
-      }
       if (this.onImport) this.onImport(message.success, message.metadata);
       if (this.isImported) this.isImported(message.success, message.metadata);
       if (this.imported) this.imported(message.success, message.metadata);
@@ -286,6 +258,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
       if (this.isImported) this.isImported(false);
       if (this.imported) this.imported(false);
     }
+    this.finishImport(ended);
   };
 
   ngAfterContentInit(): void {
@@ -313,9 +286,10 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
   }
 
   ngOnDestroy(): void {
-    this.clearProbeTimer();
     window.removeEventListener("message", this.messageListener);
-    unregisterOpenImporter(this.registryEntry);
+    // Takes the holder out of document.body: left there, it would keep covering the page with
+    // an invisible full-screen layer that nothing is left to hide.
+    this.destroyImporter();
     if (this.unsubscribeOpenImporters) {
       this.unsubscribeOpenImporters();
       this.unsubscribeOpenImporters = null;
@@ -323,28 +297,59 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
   }
 
   handleModalClosed(): void {
-    if (this.holder) {
-      this.holder.style.display = 'none';
-      this.holder.style.pointerEvents = 'auto';
+    if (this.importTracker.isInFlight()) {
+      // Closed after submitting and before the result arrived: keep the iframe and its listener
+      // so the late result still reaches onImport. It is removed once that result has been
+      // delivered (see finishImport), so the next open is a fresh load.
+      if (this.holder) {
+        this.holder.style.display = 'none';
+        this.holder.style.pointerEvents = 'auto';
+      }
+      this.lifecycle.markHidden();
+      this.isModalShown = false;
+      this.clearFileAckTimer();
+      unregisterOpenImporter(this.registryEntry);
+    } else {
+      this.destroyImporter();
     }
-    this.isModalShown = false;
-    this.isIframeLoaded = false;
-    this.openModalOnIframeLoad = false;
-    if (this.holder) this.holder.remove();
-    this.holder = null;
-    this.iframe = null;
-    // A new iframe is built on the next open, so the origin is learned again.
-    this.clearProbeTimer();
-    unregisterOpenImporter(this.registryEntry);
     if (this.onClose) this.onClose();
     if (this.isClosed) this.isClosed();
     if (this.closed) this.closed();
+  }
+
+  // Called after the result of an import has been delivered. If the modal was closed in the
+  // meantime the iframe was only hidden, so remove it now.
+  private finishImport(ended: boolean): void {
+    if (ended && !this.isModalShown && this.iframe) {
+      this.destroyImporter();
+    }
+  }
+
+  // Puts the importer away: the next open builds a new iframe with a new token.
+  private destroyImporter(): void {
+    if (this.holder) {
+      this.holder.style.display = 'none';
+      this.holder.style.pointerEvents = 'auto';
+      this.holder.remove();
+    }
+    this.holder = null;
+    this.iframe = null;
+    this.isModalShown = false;
+    this.isIframeLoaded = false;
+    this.lifecycle.markClosed();
+    this.messageGate.reset();
+    this.importTracker.reset();
+    // A new iframe is built on the next open, so the origin is learned again.
+    this.clearProbeTimer();
+    unregisterOpenImporter(this.registryEntry);
   }
 
   initImporter(): void {
     if (this.loadStarted) this.loadStarted();
 
     this.uuid = generateUuid();
+    this.messageGate.reset();
+    this.importTracker.reset();
 
     insertCSS();
 
@@ -355,16 +360,18 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     iframe.frameBorder = "0";
 
     iframe.onload = () => {
+      this.disabled = false;
+      this.isIframeLoaded = true;
+      // The handshake goes first: a consumer that calls openModalWithFile() from the ready
+      // callback needs the importer to already have its customer, columns, options and token.
+      if (this.iframe && this.iframe.contentWindow) {
+        this.iframe.contentWindow.postMessage(buildInitPayload(this.user, this.dynamicColumns, this.options, this.uuid), "*");
+      }
       if (this.onReady) this.onReady();
       if (this.isReady) this.isReady();
       if (this.importerReady) this.importerReady();
 
-      this.disabled = false;
-      this.isIframeLoaded = true;
-      if (this.iframe && this.iframe.contentWindow) {
-        this.iframe.contentWindow.postMessage(buildInitPayload(this.user, this.dynamicColumns, this.options, this.uuid), "*");
-      }
-      if (this.openModalOnIframeLoad) {
+      if (this.lifecycle.markReady()) {
         this.openModal();
       }
     };
@@ -378,52 +385,55 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
       'beforeend', this.holder
     );
     // The holder did not exist yet if openModal() asked for the importer before it was built.
-    restackOpenImporters(openImporters());
+    restackOpenImporters();
   }
 
   openModal(): void {
     // Counts as open from the moment it is requested, so the other buttons are disabled while
     // this importer is still loading, and so it is stacked above any importer opened earlier.
     registerOpenImporter(this.registryEntry);
-    if(!this.iframe) {
-        this.openModalOnIframeLoad = true;
-        this.initImporter();
-        return;
+    if (!this.iframe) {
+      this.lifecycle.requestOpen();
+      this.initImporter();
+      return;
     }
-    if(!this.isModalShown) {
-      if(this.isIframeLoaded) {
-        if(this.pendingFile) {
-          // The importer opens its own modal once it has the file, so that it can inject on
-          // 'shown.bs.modal'. Sending 'openModal' as well would race that.
-          //
-          // It can also decline: wrong step, an import file URL configured on the sheet, or
-          // an importer too old to know the message at all. So the holder goes up
-          // click-through and stays that way until 'csvbox-modal-shown' confirms the modal
-          // is really up. It covers the viewport at z-index 2147483647 and the importer
-          // renders transparent with its modal closed, so arming it on an unanswered message
-          // leaves an invisible sheet over the host page eating every click.
-          //
-          // display:block regardless, so the iframe lays out and animates normally; only
-          // pointer-events is held back. isModalShown likewise waits for the confirmation,
-          // or a declined file would latch the importer shut for good.
-          if(this.holder) {
-            this.holder.style.pointerEvents = 'none';
-            this.holder.style.display = 'block';
-          }
-          this.fileSender.send();
-        } else {
-          this.isModalShown = true;
-          if(this.holder) {
-            // Explicit: a previously declined file leaves the holder click-through.
-            this.holder.style.pointerEvents = 'auto';
-            this.holder.style.display = 'block';
-          }
-          if(this.iframe && this.iframe.contentWindow) {
-            this.iframe.contentWindow.postMessage('openModal', '*');
-          }
-        }
-      } else {
-          this.openModalOnIframeLoad = true;
+
+    if (this.pendingFile) {
+      if (!this.isIframeLoaded) {
+        // Deferred: onload's markReady() calls openModal() again once the iframe is up.
+        this.lifecycle.requestOpen();
+        return;
+      }
+      // The importer opens its own modal once it has the file, so that it can inject on
+      // 'shown.bs.modal'. Sending 'openModal' as well would race that.
+      //
+      // It can also decline: wrong step, an import file URL configured on the sheet, or an
+      // importer too old to know the message at all. So the holder goes up click-through and
+      // stays that way until 'csvbox-modal-shown' confirms the modal is really up. It covers the
+      // viewport at z-index 2147483647 and the importer renders transparent with its modal
+      // closed, so arming it on an unanswered message leaves an invisible sheet over the host
+      // page eating every click.
+      //
+      // display:block regardless, so the iframe lays out and animates normally; only
+      // pointer-events is held back. isModalShown likewise waits for the confirmation, or a
+      // declined file would latch the importer shut for good.
+      if (this.holder) {
+        this.holder.style.pointerEvents = 'none';
+        this.holder.style.display = 'block';
+      }
+      this.fileSender.send();
+      return;
+    }
+
+    if (this.lifecycle.requestOpen()) {
+      this.isModalShown = true;
+      if (this.holder) {
+        // Explicit: a previously declined file leaves the holder click-through.
+        this.holder.style.pointerEvents = 'auto';
+        this.holder.style.display = 'block';
+      }
+      if (this.iframe && this.iframe.contentWindow) {
+        this.iframe.contentWindow.postMessage('openModal', '*');
       }
     }
   }
