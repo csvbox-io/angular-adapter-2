@@ -176,8 +176,8 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
       if (!this.iframe || event.source !== this.iframe.contentWindow) {
         return;
       }
-      // A newer importer sends the typed message as well; act on that one only.
-      if (!this.messageGate.allowLegacy()) {
+      // A newer importer sends the typed twin of this message as well; act on that one only.
+      if (!this.messageGate.allowLegacy(legacy.type)) {
         return;
       }
       const ended = this.importTracker.observe(legacy);
@@ -239,7 +239,7 @@ export class CSVBoxButtonComponent implements OnInit, OnChanges, AfterContentIni
     if (!message) {
       return;
     }
-    this.messageGate.markTyped();
+    this.messageGate.markTyped(message.type);
     const ended = this.importTracker.observe(message);
     this.finishImport(ended);
 
